@@ -12,7 +12,7 @@ updates:
         patterns: ["*"]
 
   # Actions are SHA-pinned; dependabot keeps the pins current.
-  # Majors stay ungrouped — a breaking action lands in the release path.
+  # Majors get their own PR — a breaking action only shows up at release time.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -21,6 +21,9 @@ updates:
     commit-message:
       prefix: "chore(ci)"
     groups:
-      actions:
+      actions-minor:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+      actions-major:
+        patterns: ["*"]
+        update-types: ["major"]
