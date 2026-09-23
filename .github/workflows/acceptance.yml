@@ -1,0 +1,171 @@
+# Acceptance test workflow — spins up a real OpenMetadata instance via
+# docker compose (official release image) and runs TF_ACC=1 tests against it.
+#
+# The docker-compose.yml in docker/test/ is the verbatim official release file.
+# docker/test/.env contains only the test-specific overrides (heap, log level,
+# disable Airflow).  To update to a new OM version, run:
+#   ./scripts/update-test-compose.sh
+# then commit the updated docker-compose.yml and .env.
+#
+# Triggered automatically on every push to main and every PR.
+# Can also be triggered manually to test a specific version.
+name: Acceptance Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      openmetadata_version:
+        description: "OpenMetadata version (e.g. 1.12.4) — updates .env before running"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    name: Acceptance Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    env:
+      OM_HOST: "http://localhost:8585"
+      # Health check is on the admin port (8586), not the API port (8585).
+      OM_HEALTH_URL: "http://localhost:8586/healthcheck"
+      OM_ADMIN_EMAIL: "admin@open-metadata.org"
+      # Override via repo secret OM_ADMIN_PASSWORD if the default changes.
+      # Default is "admin" — the seeded password in the official OM DB image.
+      OM_ADMIN_PASSWORD: ${{ secrets.OM_ADMIN_PASSWORD || 'admin' }}
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # ── Optionally override the version in .env ──────────────────────────────
+      - name: Override OPENMETADATA_VERSION
+        if: inputs.openmetadata_version != ''
+        run: |
+          sed -i "s/^OPENMETADATA_VERSION=.*/OPENMETADATA_VERSION=${{ inputs.openmetadata_version }}/" docker/test/.env
+          echo "Using OpenMetadata version: ${{ inputs.openmetadata_version }}"
+
+      # ── Go toolchain ────────────────────────────────────────────────────────
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # ── Terraform CLI (required by terraform-plugin-testing) ─────────────────
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_wrapper: false
+
+      # ── Tune kernel for Elasticsearch ────────────────────────────────────────
+      # Elasticsearch 9.x requires vm.max_map_count ≥ 262144.
+      - name: Set vm.max_map_count for Elasticsearch
+        run: sudo sysctl -w vm.max_map_count=262144
+
+      # ── Start OpenMetadata test stack ────────────────────────────────────────
+      # We start only the services needed for provider tests — mysql, elasticsearch,
+      # execute-migrate-all (DB migration), and openmetadata-server.
+      # The heavy `ingestion` (Airflow) service is intentionally excluded;
+      # PIPELINE_SERVICE_CLIENT_ENABLED=false in docker/test/.env means
+      # the OM server will not try to reach Airflow.
+      - name: Pull images
+        run: |
+          docker compose \
+            -f docker/test/docker-compose.yml \
+            --env-file docker/test/.env \
+            pull --quiet \
+            mysql elasticsearch execute-migrate-all openmetadata-server
+
+      - name: Start OpenMetadata test stack
+        run: |
+          docker compose \
+            -f docker/test/docker-compose.yml \
+            --env-file docker/test/.env \
+            up -d \
+            mysql elasticsearch execute-migrate-all openmetadata-server
+
+      # ── Wait for OpenMetadata ────────────────────────────────────────────────
+      - name: Wait for OpenMetadata to be healthy
+        run: |
+          echo "Polling ${OM_HEALTH_URL} (up to 10 minutes)..."
+          for i in $(seq 1 60); do
+            if curl -sf "${OM_HEALTH_URL}" > /dev/null 2>&1; then
+              echo "OpenMetadata is ready after $((i * 10))s"
+              exit 0
+            fi
+            echo "  attempt ${i}/60 — waiting 10s..."
+            sleep 10
+          done
+          echo "OpenMetadata failed to become healthy. Last 100 lines of server log:"
+          docker compose \
+            -f docker/test/docker-compose.yml \
+            --env-file docker/test/.env \
+            logs openmetadata-server --tail=100
+          exit 1
+
+      # ── Acquire JWT token ────────────────────────────────────────────────────
+      - name: Acquire JWT token
+        id: auth
+        run: |
+          # OM requires the password to be base64-encoded in the login payload.
+          OM_ADMIN_PASSWORD_B64="$(echo -n "${OM_ADMIN_PASSWORD}" | base64)"
+          PAYLOAD_FILE="$(mktemp)"
+          printf '{"email":"%s","password":"%s"}' "${OM_ADMIN_EMAIL}" "${OM_ADMIN_PASSWORD_B64}" > "${PAYLOAD_FILE}"
+
+          RESPONSE="$(curl -sf -X POST \
+            "${OM_HOST}/api/v1/users/login" \
+            -H "Content-Type: application/json" \
+            --data-binary "@${PAYLOAD_FILE}")" || {
+              rm -f "${PAYLOAD_FILE}"
+              echo "Login request failed."
+              exit 1
+            }
+          rm -f "${PAYLOAD_FILE}"
+
+          TOKEN="$(echo "${RESPONSE}" | python3 -c "
+          import sys, json
+          try:
+              d = json.load(sys.stdin)
+              tok = d.get('accessToken') or d.get('token') or ''
+              if not tok:
+                  sys.stderr.write('No token in response: ' + repr(d)[:300] + '\n')
+              print(tok, end='')
+          except Exception as e:
+              sys.stderr.write('Parse error: ' + str(e) + '\n')
+          ")"
+
+          if [ -z "${TOKEN}" ]; then
+            echo "Failed to extract JWT token. Response: ${RESPONSE:0:500}"
+            exit 1
+          fi
+
+          echo "token=${TOKEN}" >> "${GITHUB_OUTPUT}"
+          echo "JWT token acquired (length: ${#TOKEN})"
+
+      # ── Run acceptance tests ─────────────────────────────────────────────────
+      - name: Run acceptance tests
+        env:
+          TF_ACC: "1"
+          OPENMETADATA_HOST: ${{ env.OM_HOST }}
+          OPENMETADATA_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          go test \
+            -v \
+            -count=1 \
+            -timeout 25m \
+            ./internal/provider/...
+
+      # ── Tear down (always runs) ──────────────────────────────────────────────
+      - name: Tear down test stack
+        if: always()
+        run: |
+          docker compose \
+            -f docker/test/docker-compose.yml \
+            --env-file docker/test/.env \
+            down -v --remove-orphans
