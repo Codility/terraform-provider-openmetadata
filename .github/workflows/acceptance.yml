@@ -27,8 +27,27 @@ permissions:
   contents: read
 
 jobs:
+  # Job-level gate, not a workflow `paths:` filter: a path-filtered required
+  # check never reports and blocks the PR forever, while a skipped job passes.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: bash .github/changed-code.sh
+
   acceptance:
     name: Acceptance Tests
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -48,8 +67,11 @@ jobs:
       # ── Optionally override the version in .env ──────────────────────────────
       - name: Override OPENMETADATA_VERSION
         if: inputs.openmetadata_version != ''
+        # Via env, not direct interpolation — the input must not reach the shell as code.
+        env:
+          OM_VERSION: ${{ inputs.openmetadata_version }}
         run: |
-          sed -i "s/^OPENMETADATA_VERSION=.*/OPENMETADATA_VERSION=${{ inputs.openmetadata_version }}/" docker/test/.env
+          sed -i "s/^OPENMETADATA_VERSION=.*/OPENMETADATA_VERSION=${OM_VERSION}/" docker/test/.env
           echo "Using OpenMetadata version: ${{ inputs.openmetadata_version }}"
 
       # ── Go toolchain ────────────────────────────────────────────────────────
