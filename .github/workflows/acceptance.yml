@@ -7,7 +7,10 @@
 #   ./scripts/update-test-compose.sh
 # then commit the updated docker-compose.yml and .env.
 #
-# Triggered automatically on every push to main and every PR.
+# Runs on pushes to main and PRs that touch the provider or its test harness —
+# doc and config changes do not need a live OpenMetadata stack. Because a
+# path-filtered workflow never reports its check, this one must NOT be a
+# required status check, or unrelated PRs would block forever.
 # Can also be triggered manually to test a specific version.
 name: Acceptance Tests
 
@@ -15,7 +18,23 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'internal/**'
+      - 'main.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'docker/test/**'
+      - 'scripts/testacc.sh'
+      - '.github/workflows/acceptance.yml'
   pull_request:
+    paths:
+      - 'internal/**'
+      - 'main.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'docker/test/**'
+      - 'scripts/testacc.sh'
+      - '.github/workflows/acceptance.yml'
   workflow_dispatch:
     inputs:
       openmetadata_version:
@@ -48,9 +67,12 @@ jobs:
       # ── Optionally override the version in .env ──────────────────────────────
       - name: Override OPENMETADATA_VERSION
         if: inputs.openmetadata_version != ''
+        # Via env, not direct interpolation — the input must not reach the shell as code.
+        env:
+          OM_VERSION: ${{ inputs.openmetadata_version }}
         run: |
-          sed -i "s/^OPENMETADATA_VERSION=.*/OPENMETADATA_VERSION=${{ inputs.openmetadata_version }}/" docker/test/.env
-          echo "Using OpenMetadata version: ${{ inputs.openmetadata_version }}"
+          sed -i "s/^OPENMETADATA_VERSION=.*/OPENMETADATA_VERSION=${OM_VERSION}/" docker/test/.env
+          echo "Using OpenMetadata version: ${OM_VERSION}"
 
       # ── Go toolchain ────────────────────────────────────────────────────────
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
