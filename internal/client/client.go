@@ -52,6 +52,10 @@ func (e *APIError) Error() string {
 
 // doRequest executes an HTTP request against the OpenMetadata API.
 func (c *Client) doRequest(ctx context.Context, method, path string, body interface{}) ([]byte, int, error) {
+	return c.doRequestWithContentType(ctx, method, path, body, "application/json")
+}
+
+func (c *Client) doRequestWithContentType(ctx context.Context, method, path string, body interface{}, contentType string) ([]byte, int, error) {
 	u := fmt.Sprintf("%s/api/v1/%s", c.BaseURL, strings.TrimLeft(path, "/"))
 
 	var reqBody io.Reader
@@ -69,7 +73,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 		return nil, 0, fmt.Errorf("creating request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Accept", "application/json")
 	if c.Token != "" {
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.Token))
@@ -107,6 +111,17 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 // CreateOrUpdate performs an idempotent PUT (OM's create_or_update pattern).
 func (c *Client) CreateOrUpdate(ctx context.Context, collection string, body interface{}) (json.RawMessage, error) {
 	respBody, _, err := c.doRequest(ctx, http.MethodPut, collection, body)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(respBody), nil
+}
+
+// Patch applies a JSON Patch (RFC 6902) to an entity by ID. Only the listed paths change,
+// unlike PUT, which needs the full entity (e.g. a service's connection) in the body.
+func (c *Client) Patch(ctx context.Context, collection, id string, ops []map[string]interface{}) (json.RawMessage, error) {
+	path := fmt.Sprintf("%s/%s", collection, id)
+	respBody, _, err := c.doRequestWithContentType(ctx, http.MethodPatch, path, ops, "application/json-patch+json")
 	if err != nil {
 		return nil, err
 	}
