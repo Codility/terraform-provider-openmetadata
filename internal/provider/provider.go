@@ -115,6 +115,7 @@ func (p *OpenMetadataProvider) Resources(_ context.Context) []func() resource.Re
 		resources.NewPolicyResource,
 		resources.NewRoleResource,
 		resources.NewDatabaseServiceResource,
+		resources.NewDashboardServiceResource,
 		resources.NewDomainResource,
 	}
 }
