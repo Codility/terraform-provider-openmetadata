@@ -6,20 +6,23 @@
 #
 # Usage:
 #   ./scripts/testacc.sh [go test flags]
+#   OM_VERSION=2.0.3 ./scripts/testacc.sh [go test flags]
 #
 # Examples:
-#   ./scripts/testacc.sh                           # run all acceptance tests
-#   ./scripts/testacc.sh -run TestAccClassification    # run one test
-#   ./scripts/testacc.sh -v -timeout 30m           # verbose with custom timeout
+#   ./scripts/testacc.sh                              # default version (from .env)
+#   OM_VERSION=2.0.3 ./scripts/testacc.sh             # specific version
+#   OM_VERSION=1.12.4 ./scripts/testacc.sh -run TestAccClassification
+#
+# To run all supported versions in sequence use scripts/testacc-all.sh (or make testacc-all).
 #
 # Prerequisites: docker (compose v2), go, python3, curl
 #
 # Environment overrides:
-#   OPENMETADATA_VERSION  Image tag (read from docker/test/.env by default)
-#   OM_ADMIN_EMAIL        Admin email   (default: admin@open-metadata.org)
-#   OM_ADMIN_PASSWORD     Admin password (default: admin)
-#   OM_HOST               OM API base URL (default: http://localhost:8585)
-#   SKIP_DOCKER           Set to 1 to skip compose lifecycle (use existing OM)
+#   OM_VERSION          Passed as OPENMETADATA_VERSION to docker compose, overriding .env
+#   OM_ADMIN_EMAIL      Admin email     (default: admin@open-metadata.org)
+#   OM_ADMIN_PASSWORD   Admin password  (default: admin)
+#   OM_HOST             OM API base URL (default: http://localhost:8585)
+#   SKIP_DOCKER         Set to 1 to skip compose lifecycle (use an already-running OM)
 
 set -euo pipefail
 
@@ -29,14 +32,13 @@ COMPOSE_FILE="${REPO_ROOT}/docker/test/docker-compose.yml"
 ENV_FILE="${REPO_ROOT}/docker/test/.env"
 
 OM_HOST="${OM_HOST:-http://localhost:8585}"
-# OM exposes its health check on port 8586 (/healthcheck), not 8585.
 OM_HEALTH_URL="${OM_HEALTH_URL:-http://localhost:8586/healthcheck}"
 OM_ADMIN_EMAIL="${OM_ADMIN_EMAIL:-admin@open-metadata.org}"
 OM_ADMIN_PASSWORD="${OM_ADMIN_PASSWORD:-admin}"
 SKIP_DOCKER="${SKIP_DOCKER:-0}"
 
-# Services to start — we intentionally skip the heavy `ingestion` (Airflow)
-# service because PIPELINE_SERVICE_CLIENT_ENABLED=false makes it unnecessary.
+# Services to start — intentionally excludes `ingestion` (Airflow) because
+# PIPELINE_SERVICE_CLIENT_ENABLED=false makes it unnecessary for provider tests.
 OM_SERVICES="mysql elasticsearch execute-migrate-all openmetadata-server"
 
 RED='\033[0;31m'
@@ -56,28 +58,46 @@ command -v curl     >/dev/null 2>&1 || die "curl is not installed"
 command -v go       >/dev/null 2>&1 || die "go is not installed"
 docker compose version >/dev/null 2>&1 || die "docker compose (v2) is not available"
 
-[ -f "${COMPOSE_FILE}" ] || die "docker-compose.yml not found at ${COMPOSE_FILE}. Run: scripts/update-test-compose.sh"
+[ -f "${COMPOSE_FILE}" ] || die "docker-compose.yml not found at ${COMPOSE_FILE}"
 [ -f "${ENV_FILE}" ]     || die ".env not found at ${ENV_FILE}"
+
+# ── resolve version (OM_VERSION overrides .env OPENMETADATA_VERSION) ──────────
+
+# When OM_VERSION is set, pass OPENMETADATA_VERSION as an environment variable.
+# Docker Compose gives shell environment variables precedence over --env-file values.
+if [ -n "${OM_VERSION:-}" ]; then
+  export OPENMETADATA_VERSION="${OM_VERSION}"
+fi
+
+# Print the version that will actually be used.
+EFFECTIVE_VERSION="${OPENMETADATA_VERSION:-$(grep -E '^OPENMETADATA_VERSION=' "${ENV_FILE}" | cut -d= -f2)}"
+log "OpenMetadata version: ${EFFECTIVE_VERSION}"
+
+# ── docker compose helper ─────────────────────────────────────────────────────
+
+# Unique project name per version keeps named volumes (e.g. es-data) isolated so
+# sequential runs against different versions don't share state.
+PROJECT_NAME="openmetadata-testacc-${EFFECTIVE_VERSION//\./-}"
+
+dc() { docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" -p "${PROJECT_NAME}" "$@"; }
 
 # ── docker compose lifecycle ───────────────────────────────────────────────────
 
 cleanup() {
   if [ "${SKIP_DOCKER}" = "0" ]; then
-    log "Tearing down test stack..."
-    docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" \
-      down -v --remove-orphans 2>/dev/null || true
+    log "Tearing down test stack (${EFFECTIVE_VERSION})..."
+    dc down -v --remove-orphans 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
 
 if [ "${SKIP_DOCKER}" = "0" ]; then
   log "Pulling images (this may take a while on first run)..."
-  docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" pull --quiet ${OM_SERVICES}
+  dc pull --quiet ${OM_SERVICES}
 
   log "Starting OpenMetadata test stack..."
   log "  (DB migration runs first — expect 3-7 min on first boot)"
-  docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" \
-    up -d ${OM_SERVICES}
+  dc up -d ${OM_SERVICES}
 fi
 
 # ── wait for OpenMetadata ─────────────────────────────────────────────────────
@@ -90,10 +110,9 @@ ELAPSED=0
 until curl -sf "${OM_HEALTH_URL}" >/dev/null 2>&1; do
   if [ "${ELAPSED}" -ge "${MAX_WAIT}" ]; then
     echo ""
-    echo "OpenMetadata did not become healthy within ${MAX_WAIT}s."
+    echo "OpenMetadata ${EFFECTIVE_VERSION} did not become healthy within ${MAX_WAIT}s."
     echo "Server logs (last 50 lines):"
-    docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" \
-      logs openmetadata-server --tail=50
+    dc logs openmetadata-server --tail=50
     exit 1
   fi
   echo "  ... still waiting (${ELAPSED}s / ${MAX_WAIT}s)"
@@ -143,8 +162,8 @@ log "JWT token acquired (length: ${#OM_TOKEN})."
 # ── run acceptance tests ───────────────────────────────────────────────────────
 
 log "Running acceptance tests..."
-log "  OPENMETADATA_HOST  = ${OM_HOST}"
-log "  TF_ACC             = 1"
+log "  OPENMETADATA_HOST = ${OM_HOST}"
+log "  TF_ACC            = 1"
 
 cd "${REPO_ROOT}"
 TF_ACC=1 \

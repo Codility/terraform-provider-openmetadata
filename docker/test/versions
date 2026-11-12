@@ -1,0 +1,11 @@
+# Supported OpenMetadata versions for acceptance tests.
+# First non-comment line is the default used by `make testacc` (no OM_VERSION set).
+# To add a new version:
+#   1. Add the version here.
+#   2. Run:  make update-test-compose OM_VERSION=<version>
+#      This downloads the official docker-compose.yml into docker/test/<version>/.
+#   3. Copy docker/test/<existing>/.env to docker/test/<version>/.env and update
+#      OPENMETADATA_VERSION.
+#   4. Commit docker/test/<version>/.env and docker/test/<version>/docker-compose.yml.
+1.12.4
+2.0.3

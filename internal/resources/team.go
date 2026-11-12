@@ -113,7 +113,11 @@ func (r *TeamResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
-	body := r.buildCreateBody(ctx, &plan)
+	body, err := r.buildCreateBody(ctx, &plan)
+	if err != nil {
+		resp.Diagnostics.AddError("Error building team request", err.Error())
+		return
+	}
 
 	raw, err := r.client.CreateOrUpdate(ctx, teamCollection, body)
 	if err != nil {
@@ -153,7 +157,11 @@ func (r *TeamResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
-	body := r.buildCreateBody(ctx, &plan)
+	body, err := r.buildCreateBody(ctx, &plan)
+	if err != nil {
+		resp.Diagnostics.AddError("Error building team request", err.Error())
+		return
+	}
 
 	raw, err := r.client.CreateOrUpdate(ctx, teamCollection, body)
 	if err != nil {
@@ -192,13 +200,14 @@ func (r *TeamResource) ImportState(ctx context.Context, req resource.ImportState
 	}
 
 	var state TeamResourceModel
+	state.Parents = types.ListNull(types.StringType) // zero-value has no element type; initialize before readIntoState
 	r.readIntoState(ctx, raw, &state, resp)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
 // --- internal helpers ---
 
-func (r *TeamResource) buildCreateBody(ctx context.Context, plan *TeamResourceModel) map[string]interface{} {
+func (r *TeamResource) buildCreateBody(ctx context.Context, plan *TeamResourceModel) (map[string]interface{}, error) {
 	body := map[string]interface{}{
 		"name":     plan.Name.ValueString(),
 		"teamType": plan.TeamType.ValueString(),
@@ -216,9 +225,27 @@ func (r *TeamResource) buildCreateBody(ctx context.Context, plan *TeamResourceMo
 		body["isJoinable"] = plan.IsJoinable.ValueBool()
 	}
 	if !plan.Parents.IsNull() && !plan.Parents.IsUnknown() {
-		var parents []string
-		plan.Parents.ElementsAs(ctx, &parents, false)
-		body["parents"] = parents
+		var parentNames []string
+		plan.Parents.ElementsAs(ctx, &parentNames, false)
+		// The OM CreateTeam schema expects parents as a plain UUID array,
+		// not entity ref objects. Resolve each name to its UUID.
+		uuids := make([]string, 0, len(parentNames))
+		for _, name := range parentNames {
+			raw, err := r.client.GetByName(ctx, teamCollection, name, nil)
+			if err != nil {
+				return nil, fmt.Errorf("resolving parent team %q: %w", name, err)
+			}
+			data, err := Unmarshal(raw)
+			if err != nil {
+				return nil, fmt.Errorf("parsing parent team %q: %w", name, err)
+			}
+			id, _ := data["id"].(string)
+			if id == "" {
+				return nil, fmt.Errorf("parent team %q returned no id", name)
+			}
+			uuids = append(uuids, id)
+		}
+		body["parents"] = uuids
 	}
 	if !plan.Policies.IsNull() && !plan.Policies.IsUnknown() {
 		var policies []string
@@ -233,7 +260,7 @@ func (r *TeamResource) buildCreateBody(ctx context.Context, plan *TeamResourceMo
 	if !plan.Owners.IsNull() && !plan.Owners.IsUnknown() {
 		body["owners"] = r.extractOwners(ctx, plan)
 	}
-	return body
+	return body, nil
 }
 
 func (r *TeamResource) extractOwners(ctx context.Context, plan *TeamResourceModel) []EntityRef {
@@ -265,12 +292,12 @@ func (r *TeamResource) readIntoState(ctx context.Context, raw []byte, state *Tea
 	state.Email = StringVal(data, "email")
 	state.IsJoinable = BoolVal(data, "isJoinable")
 	state.FQN = StringVal(data, "fullyQualifiedName")
-	// parents is intentionally NOT read from the API response. OM always places
-	// teams under Organisation by default, which would override the null state
-	// and cause "Provider produced inconsistent result after apply". Parents
-	// provided by the user are sent on create/update but not reflected back.
-	// For import, parents is excluded via ImportStateVerifyIgnore.
-	state.Parents = types.ListNull(types.StringType)
+	// parents is intentionally NOT read from the API response. OM always
+	// returns the implicit Organisation parent even when the user didn't
+	// specify one, which would cause drift. We preserve whatever the caller
+	// already has on the model (the planned value on Create/Update, the
+	// existing state value on Read). On import the field is unknown, so
+	// callers must add "parents" to ImportStateVerifyIgnore.
 	state.Policies = StringListVal(data, "policies")
 	state.Domains = StringListVal(data, "domains")
 	state.Owners = OwnersListNull()

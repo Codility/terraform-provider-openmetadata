@@ -15,10 +15,11 @@ volumes:
   ingestion-volume-dags:
   ingestion-volume-tmp:
   es-data:
+  mysql-data:  # named volume so `docker compose down -v` fully cleans the DB
 services:
   mysql:
     container_name: openmetadata_mysql
-    image: docker.getcollate.io/openmetadata/db:1.12.4
+    image: docker.getcollate.io/openmetadata/db:${OPENMETADATA_VERSION}
     command: "--sort_buffer_size=10M"
     restart: always
     environment:
@@ -28,7 +29,7 @@ services:
     ports:
       - "3306:3306"
     volumes:
-     - ./docker-volume/db-data:/var/lib/mysql
+     - mysql-data:/var/lib/mysql
     networks:
       - app_net
     healthcheck:
@@ -59,7 +60,7 @@ services:
 
   execute-migrate-all:
     container_name: execute_migrate_all
-    image: docker.getcollate.io/openmetadata/server:1.12.4
+    image: docker.getcollate.io/openmetadata/server:${OPENMETADATA_VERSION}
     command: "./bootstrap/openmetadata-ops.sh migrate"
     environment:
       OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
@@ -284,7 +285,7 @@ services:
   openmetadata-server:
     container_name: openmetadata_server
     restart: always
-    image: docker.getcollate.io/openmetadata/server:1.12.4
+    image: docker.getcollate.io/openmetadata/server:${OPENMETADATA_VERSION}
     environment:
       OPENMETADATA_CLUSTER_NAME: ${OPENMETADATA_CLUSTER_NAME:-openmetadata}
       SERVER_PORT: ${SERVER_PORT:-8585}
@@ -504,7 +505,7 @@ services:
 
   ingestion:
     container_name: openmetadata_ingestion
-    image: docker.getcollate.io/openmetadata/ingestion:1.12.4
+    image: docker.getcollate.io/openmetadata/ingestion:${OPENMETADATA_VERSION}
     depends_on:
       elasticsearch:
         condition: service_started

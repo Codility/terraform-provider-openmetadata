@@ -78,6 +78,46 @@ func TestAccTeamResourceWithEmail(t *testing.T) {
 	})
 }
 
+// TestAccTeamResourceWithParents verifies that a team can be placed under a
+// parent team using the parents field. parents is preserved in state from the
+// plan (not re-read from the API) so no drift occurs on subsequent plans.
+// Import ignores parents because the API does not expose them in a form we can
+// round-trip back to the user-supplied names.
+func TestAccTeamResourceWithParents(t *testing.T) {
+	parentName := testRandName("tp")
+	childName := testRandName("tc")
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			// ── Create parent and child ────────────────────────────────────────
+			{
+				Config: testAccTeamConfigWithParents(parentName, childName),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("openmetadata_team.parent", "name", parentName),
+					resource.TestCheckResourceAttr("openmetadata_team.child", "name", childName),
+					resource.TestCheckResourceAttr("openmetadata_team.child", "team_type", "Department"),
+					resource.TestCheckResourceAttr("openmetadata_team.child", "parents.#", "1"),
+					resource.TestCheckResourceAttr("openmetadata_team.child", "parents.0", parentName),
+					resource.TestCheckResourceAttrSet("openmetadata_team.child", "id"),
+				),
+			},
+			// ── Import child ────────────────────────────────────────────────
+			{
+				ResourceName:            "openmetadata_team.child",
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"parents"},
+				ImportStateIdFunc: func(s *terraform.State) (string, error) {
+					rs := s.RootModule().Resources["openmetadata_team.child"]
+					return rs.Primary.Attributes["name"], nil
+				},
+			},
+		},
+	})
+}
+
 func testAccTeamConfig(name, description, teamType string) string {
 	return fmt.Sprintf(`
 %s
@@ -99,4 +139,21 @@ resource "openmetadata_team" "test" {
   email = %q
 }
 `, testProviderBlock(), name, email)
+}
+
+func testAccTeamConfigWithParents(parentName, childName string) string {
+	return fmt.Sprintf(`
+%s
+
+resource "openmetadata_team" "parent" {
+  name      = %q
+  team_type = "Department"
+}
+
+resource "openmetadata_team" "child" {
+  name      = %q
+  team_type = "Department"
+  parents   = [openmetadata_team.parent.name]
+}
+`, testProviderBlock(), parentName, childName)
 }

@@ -12,7 +12,9 @@ dist/
 *.tfplan
 crash.log
 
-# Docker — volume data written by docker compose (never commit runtime data)
+# Docker — volume data written by docker compose (never commit runtime data).
+# mysql-data is now a named volume (cleaned by `docker compose down -v`).
+# The docker-volume dir may still contain other bind-mount leftovers.
 docker/test/docker-volume/
 
 # Claude Code — local agent config, memory, and skills (dev-only, not project files)
